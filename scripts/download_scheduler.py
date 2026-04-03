@@ -29,7 +29,7 @@ from opendiscourse.utils.download_state import DownloadStateManager
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("/var/log/opendiscourse/scheduler.log"), logging.StreamHandler(sys.stdout)],
+    handlers=[logging.FileHandler("/tmp/opendiscourse_logs/scheduler.log"), logging.StreamHandler(sys.stdout)],
 )
 
 logger = logging.getLogger(__name__)
@@ -287,7 +287,7 @@ async def main():
 
 if __name__ == "__main__":
     # Ensure log directory exists
-    Path("/var/log/opendiscourse").mkdir(parents=True, exist_ok=True)
+    Path("/tmp/opendiscourse_logs").mkdir(parents=True, exist_ok=True)
 
     # Run the scheduler
     asyncio.run(main())

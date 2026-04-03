@@ -5,9 +5,13 @@ Handles: candidates, committees, candidate totals, and Schedule A contributions.
 """
 
 import logging
+import os
+import tempfile
 import threading
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -17,9 +21,9 @@ from opendiscourse.config import get_settings
 from opendiscourse.database import sync_engine
 from opendiscourse.ingestion.base import BaseIngestion
 from opendiscourse.models.campaign_finance import (
+    FECCandidate,
     FECCommittee,
     FECContribution,
-    FECCandidate,
     FECTotal,
     FECCommitteeCandidate,
     FECDisbursement,
@@ -113,7 +117,7 @@ class FECIngestion(BaseIngestion):
                 try:
                     from sqlalchemy.dialects.postgresql import insert
 
-                    stmt = insert(FECandidate).values(
+                    stmt = insert(FECCandidate).values(
                         fec_candidate_id=c["candidate_id"],
                         name=clean_text(c.get("name", "")),
                         party=clean_text(c.get("party")),
@@ -237,7 +241,7 @@ class FECIngestion(BaseIngestion):
                 try:
                     from sqlalchemy.dialects.postgresql import insert
 
-                    stmt = insert(FECandidateTotal).values(
+                    stmt = insert(FECTotal).values(
                         candidate_id=t.get("candidate_id"),
                         cycle=t.get("cycle"),
                         receipts=safe_float(t.get("receipts")),
