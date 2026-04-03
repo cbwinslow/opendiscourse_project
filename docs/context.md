@@ -2,12 +2,54 @@
 
 ## Current Status
 **Date**: 2026-04-03
-**Phase**: Phase 2 - Congress.gov Ingestion (COMPLETE)
-**Status**: Congress 118 (21,330 records) and 119 (16,678 records) successfully ingested
+**Phase**: Phase 3 - GovInfo Ingestion (IN PROGRESS)
+**Status**: GovInfo pipeline built (govinfo.py). Bill status and bill text parsing verified. Sitemap URLs fixed. Bill text extraction from `<legis-body>` works. CREC and FR sitemaps working.
 
 ---
 
 ## Recent Decisions
+
+### 2026-04-03 - GovInfo Ingestion Pipeline Built
+- **GovInfo API is unreliable**: REST API returns 500 errors on collections, date format errors on summaries. Using sitemap/bulk data downloads instead.
+- **Sitemap URLs**: 
+  - BILLSTATUS: `https://www.govinfo.gov/sitemap/bulkdata/BILLSTATUS/sitemapindex.xml` (96 sitemaps, organized by congress+type like `118hr`)
+  - BILLS: `https://www.govinfo.gov/sitemap/BILLS_sitemap_index.xml` (34 sitemaps by year)
+  - CREC: `https://www.govinfo.gov/sitemap/CREC_sitemap_index.xml` (33 sitemaps by year)
+  - FR: `https://www.govinfo.gov/sitemap/FR_sitemap_index.xml` (91 sitemaps by year)
+- **BILLSTATUS format**: Plain XML (not ZIP), no namespace. Structure: `<billStatus><bill><congress>118</congress><type>HR</type><number>1</number><title>...</title></bill></billStatus>`
+- **Bill text format**: XML in ZIP files from GovInfo content URLs. Structure: `<bill><metadata>...<legis-body>...</legis-body></bill>`. Text extracted via `etree.tostring(method="text")`.
+- **Bill text URL pattern**: `https://www.govinfo.gov/content/pkg/BILLS-{congress}{type}{number}{version}/xml/BILLS-{congress}{type}{number}{version}.xml`
+- **Bill text parsing**: Regex `BILLS-(\d+)([a-z]+)(\d+)([a-z]+)` extracts congress, type, number, version from filename
+- **Bill status ingestion**: Updates existing Bill records with titles, sponsors, latest actions from BILLSTATUS XML
+- **Bill text ingestion**: Creates BillText records with full text content from `<legis-body>` element
+- **CREC/FR ingestion**: Downloads ZIP packages, extracts XML content, stores in CongressionalRecord/FederalRegister tables
+- **Bugs fixed in govinfo.py**:
+  1. BILLSTATUS sitemap URL was wrong (used lowercase path, should be `bulkdata/BILLSTATUS/sitemapindex.xml`)
+  2. Bill type filter was case-sensitive (URLs use lowercase `/hr/` not `/HR/`)
+  3. Bill text parser looked for wrong XML element (`bill-text` → `legis-body`)
+  4. Bill text filename extraction used `[-2]` (directory) instead of `[-1]` (filename)
+  5. Bill status parser used namespace prefixes but XML has no namespace
+
+### 2026-04-03 - GovInfo Ingestion Pipeline Built
+- **GovInfo API is unreliable**: REST API returns 500 errors on collections, date format errors on summaries. Using sitemap/bulk data downloads instead.
+- **Sitemap URLs**: 
+  - BILLSTATUS: `https://www.govinfo.gov/sitemap/bulkdata/BILLSTATUS/sitemapindex.xml` (96 sitemaps, organized by congress+type like `118hr`)
+  - BILLS: `https://www.govinfo.gov/sitemap/BILLS_sitemap_index.xml` (34 sitemaps by year)
+  - CREC: `https://www.govinfo.gov/sitemap/CREC_sitemap_index.xml` (33 sitemaps by year)
+  - FR: `https://www.govinfo.gov/sitemap/FR_sitemap_index.xml` (91 sitemaps by year)
+- **BILLSTATUS format**: Plain XML (not ZIP), no namespace. Structure: `<billStatus><bill><congress>118</congress><type>HR</type><number>1</number><title>...</title></bill></billStatus>`
+- **Bill text format**: XML in ZIP files from GovInfo content URLs. Structure: `<bill><metadata>...<legis-body>...</legis-body></bill>`. Text extracted via `etree.tostring(method="text")`.
+- **Bill text URL pattern**: `https://www.govinfo.gov/content/pkg/BILLS-{congress}{type}{number}{version}/xml/BILLS-{congress}{type}{number}{version}.xml`
+- **Bill text parsing**: Regex `BILLS-(\d+)([a-z]+)(\d+)([a-z]+)` extracts congress, type, number, version from filename
+- **Bill status ingestion**: Updates existing Bill records with titles, sponsors, latest actions from BILLSTATUS XML
+- **Bill text ingestion**: Creates BillText records with full text content from `<legis-body>` element
+- **CREC/FR ingestion**: Downloads ZIP packages, extracts XML content, stores in CongressionalRecord/FederalRegister tables
+- **Bugs fixed in govinfo.py**:
+  1. BILLSTATUS sitemap URL was wrong (used lowercase path, should be `bulkdata/BILLSTATUS/sitemapindex.xml`)
+  2. Bill type filter was case-sensitive (URLs use lowercase `/hr/` not `/HR/`)
+  3. Bill text parser looked for wrong XML element (`bill-text` → `legis-body`)
+  4. Bill text filename extraction used `[-2]` (directory) instead of `[-1]` (filename)
+  5. Bill status parser used namespace prefixes but XML has no namespace
 
 ### 2026-04-03 - Real Ingestion Completed
 - **Congress 118**: 20 congresses, 1,250 members, 818 committees, 19,242 bills = 21,330 total records
@@ -230,4 +272,8 @@
 13. ~~Test dry run~~ DONE (congress 118 endpoints verified)
 14. ~~Add API keys to `.env`~~ DONE
 15. ~~Run real ingestion~~ DONE (Congress 118: 21,330 records, Congress 119: 16,678 records)
-16. Begin Phase 3: GovInfo ingestion (bill text, Congressional Record, Federal Register)
+16. ~~Build GovInfo ingestion pipeline~~ DONE (govinfo.py - 778 lines, sitemap-based)
+17. Run full GovInfo ingestion: bill status updates + bill text for Congress 118
+18. Build Congressional Record ingestion (CREC) - sitemaps working, needs testing
+19. Build Federal Register ingestion (FR) - sitemaps working, needs testing
+20. Begin Phase 4: Campaign Finance (FEC API + OpenSecrets)
