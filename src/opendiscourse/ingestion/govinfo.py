@@ -14,6 +14,7 @@ import logging
 import os
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -135,180 +136,316 @@ class GovInfoIngestion(BaseIngestion):
                     return zf.read(name)
         return None
 
+    def _process_entries_batch(self, entries: List[Dict[str, str]], process_fn, batch_label: str) -> Dict[str, int]:
+        """Process a batch of entries using thread pool for parallel downloads.
+
+        Args:
+            entries: List of entry dicts with 'url' key
+            process_fn: Callable that takes xml_data and returns True if updated
+            batch_label: Label for logging
+
+        Returns:
+            Dict with processed, updated, failed counts
+        """
+        processed = 0
+        updated = 0
+        failed = 0
+        results_lock = __import__("threading").Lock()
+
+        def process_one(entry):
+            nonlocal processed, updated, failed
+            try:
+                xml_data = self._download_package(entry["url"])
+                if not xml_data:
+                    with results_lock:
+                        failed += 1
+                    return
+                result = process_fn(xml_data)
+                with results_lock:
+                    processed += 1
+                    if result:
+                        updated += 1
+            except Exception as e:
+                logger.warning(f"Failed to process {batch_label}: {e}")
+                with results_lock:
+                    failed += 1
+
+        max_workers = min(10, len(entries))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(process_one, entry) for entry in entries]
+            for i, future in enumerate(as_completed(futures)):
+                if (i + 1) % 500 == 0:
+                    logger.info(f"  {batch_label}: {i + 1}/{len(entries)} processed")
+
+        return {"processed": processed, "updated": updated, "failed": failed}
+
+    def _process_entries_batch(self, entries: List[Dict[str, str]], process_fn, batch_label: str) -> Dict[str, int]:
+        """Process a batch of entries using thread pool for parallel downloads.
+
+        Args:
+            entries: List of entry dicts with 'url' key
+            process_fn: Callable that takes xml_data and returns True if updated
+            batch_label: Label for logging
+
+        Returns:
+            Dict with processed, updated, failed counts
+        """
+        processed = 0
+        updated = 0
+        failed = 0
+        results_lock = __import__("threading").Lock()
+
+        def process_one(entry):
+            nonlocal processed, updated, failed
+            try:
+                xml_data = self._download_package(entry["url"])
+                if not xml_data:
+                    with results_lock:
+                        failed += 1
+                    return
+                result = process_fn(xml_data)
+                with results_lock:
+                    processed += 1
+                    if result:
+                        updated += 1
+            except Exception as e:
+                logger.warning(f"Failed to process {batch_label}: {e}")
+                with results_lock:
+                    failed += 1
+
+        max_workers = min(10, len(entries))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(process_one, entry) for entry in entries]
+            for i, future in enumerate(as_completed(futures)):
+                if (i + 1) % 500 == 0:
+                    logger.info(f"  {batch_label}: {i + 1}/{len(entries)} processed")
+
+        return {"processed": processed, "updated": updated, "failed": failed}
+
     # ----------------------------------------------------------------
     # Bill Status (BILLSTATUS bulk collection - plain XML, no ZIP)
     # ----------------------------------------------------------------
 
     def ingest_bill_status(
         self,
-        congress_number: int = 118,
+        congress_numbers: Optional[List[int]] = None,
         bill_types: Optional[List[str]] = None,
+        max_workers: int = 8,
     ) -> Dict[str, int]:
         """Ingest bill status XML from GovInfo BILLSTATUS bulk collection.
 
         Updates existing Bill records with detailed status information
-        from the official GovInfo XML.
+        from the official GovInfo XML. Processes multiple congresses in parallel.
+
+        Args:
+            congress_numbers: List of congress numbers to process. Defaults to [118, 119].
+            bill_types: Bill types to process. Defaults to all types.
+            max_workers: Max parallel download threads.
         """
-        logger.info(f"Ingesting bill status for congress {congress_number}...")
+        congress_numbers = congress_numbers or [118, 119]
         bill_types = bill_types or ["hr", "s", "hres", "sres", "hjres", "sjres", "hconres", "sconres"]
 
-        total_processed = 0
-        total_updated = 0
-        total_failed = 0
+        logger.info(f"Ingesting bill status for congresses {congress_numbers}...")
 
-        # Get all BILLSTATUS sitemaps and filter by congress
+        # Get all BILLSTATUS sitemaps
         try:
-            sitemap_urls = self._fetch_sitemap_index("BILLSTATUS")
+            all_sitemap_urls = self._fetch_sitemap_index("BILLSTATUS")
         except Exception as e:
             logger.error(f"Failed to fetch BILLSTATUS sitemap index: {e}")
             return {"records_processed": 0, "records_inserted": 0, "records_updated": 0, "records_failed": 1}
 
-        # Filter sitemaps for target congress
-        target_sitemaps = [u for u in sitemap_urls if f"/{congress_number}" in u]
-        logger.info(f"Found {len(target_sitemaps)} BILLSTATUS sitemaps for congress {congress_number}")
+        # Filter sitemaps for target congresses
+        target_sitemaps = []
+        for cn in congress_numbers:
+            sitemaps = [u for u in all_sitemap_urls if f"/{cn}" in u]
+            # Filter by bill type
+            if bill_types:
+                type_patterns = [f"/{t.lower()}/" for t in bill_types]
+                sitemaps = [u for u in sitemaps if any(p in u for p in type_patterns)]
+            target_sitemaps.extend(sitemaps)
+
+        logger.info(f"Found {len(target_sitemaps)} BILLSTATUS sitemaps for congresses {congress_numbers}")
+
+        # Collect all entries across all sitemaps
+        all_entries = []
+        for sitemap_url in target_sitemaps:
+            try:
+                entries = self._fetch_sitemap(sitemap_url)
+                all_entries.extend(entries)
+            except Exception as e:
+                logger.warning(f"Failed to fetch sitemap {sitemap_url}: {e}")
+
+        logger.info(f"Total bill status files to process: {len(all_entries)}")
+
+        # Phase 1: Parallel download and parse - collect results
+        parsed_results: List[Dict] = []
+        results_lock = __import__("threading").Lock()
+        processed = 0
+        updated = 0
+        failed = 0
+        count_lock = __import__("threading").Lock()
+
+        def process_one(entry):
+            nonlocal processed, updated, failed
+            try:
+                xml_data = self._download_package(entry["url"])
+                if not xml_data:
+                    with count_lock:
+                        failed += 1
+                    return
+
+                # Parse without DB session - extract all fields
+                result = self._extract_bill_status_data(xml_data)
+                if result is None:
+                    with count_lock:
+                        failed += 1
+                    return
+
+                with results_lock:
+                    parsed_results.append(result)
+                with count_lock:
+                    processed += 1
+                    if result.get("changed"):
+                        updated += 1
+
+            except Exception as e:
+                logger.warning(f"Failed to process bill status: {e}")
+                with count_lock:
+                    failed += 1
+
+        # Run parallel downloads
+        workers = min(max_workers, len(all_entries))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process_one, entry) for entry in all_entries]
+            for i, future in enumerate(as_completed(futures)):
+                if (i + 1) % 500 == 0:
+                    logger.info(f"  Downloaded {i + 1}/{len(all_entries)} bill status files...")
+
+        logger.info(f"Downloads complete: {processed} processed, {updated} changed, {failed} failed")
+
+        # Phase 2: Batch upsert to database
+        logger.info(f"Upserting {len(parsed_results)} bill status records to database...")
+        upserted = 0
+        upsert_failed = 0
 
         with Session(sync_engine) as session:
-            for sitemap_url in target_sitemaps:
+            for result in parsed_results:
                 try:
-                    entries = self._fetch_sitemap(sitemap_url)
+                    bill = (
+                        session.query(Bill)
+                        .filter(
+                            Bill.congress_id == result["congress"],
+                            Bill.bill_type == result["bill_type"],
+                            Bill.number == result["number"],
+                        )
+                        .first()
+                    )
+                    if not bill:
+                        continue
+
+                    changed = False
+                    if result.get("title") and bill.title != result["title"]:
+                        bill.title = result["title"]
+                        changed = True
+                    if result.get("introduced_date") and bill.introduced_date != result["introduced_date"]:
+                        bill.introduced_date = result["introduced_date"]
+                        changed = True
+                    if result.get("origin_chamber") and bill.origin_chamber != result["origin_chamber"]:
+                        bill.origin_chamber = result["origin_chamber"]
+                        changed = True
+                    if result.get("latest_action_date") and bill.latest_action_date != result["latest_action_date"]:
+                        bill.latest_action_date = result["latest_action_date"]
+                        changed = True
+                    if result.get("latest_action") and bill.latest_action != result["latest_action"]:
+                        bill.latest_action = result["latest_action"]
+                        changed = True
+                    if result.get("sponsor_bioguide"):
+                        from opendiscourse.models.congress import Member
+
+                        member = session.query(Member).filter(Member.bioguide_id == result["sponsor_bioguide"]).first()
+                        if member and bill.sponsor_id != member.id:
+                            bill.sponsor_id = member.id
+                            changed = True
+
+                    if changed:
+                        upserted += 1
+
                 except Exception as e:
-                    logger.warning(f"Failed to fetch sitemap {sitemap_url}: {e}")
-                    continue
-
-                # Filter by bill type if specified
-                # Entry URLs: .../118/hr/BILLSTATUS-118hr1.xml (lowercase type)
-                if bill_types:
-                    type_patterns = [f"/{t.lower()}/" for t in bill_types]
-                    entries = [e for e in entries if any(p in e["url"] for p in type_patterns)]
-
-                logger.info(f"  {sitemap_url.split('/')[-1]}: {len(entries)} bill status files")
-
-                for entry in entries:
-                    try:
-                        # BILLSTATUS is plain XML, not ZIP
-                        xml_data = self._download_package(entry["url"])
-                        if not xml_data:
-                            total_failed += 1
-                            continue
-
-                        updated = self._parse_bill_status_xml(session, xml_data)
-                        if updated:
-                            total_updated += 1
-                        total_processed += 1
-
-                    except Exception as e:
-                        logger.warning(f"Failed to process bill status: {e}")
-                        total_failed += 1
-
-                    if total_processed % 100 == 0:
-                        session.commit()
-                        logger.info(f"  Processed {total_processed} bill status files...")
+                    logger.warning(f"Failed to upsert bill status: {e}")
+                    upsert_failed += 1
 
             session.commit()
 
         stats = {
-            "records_processed": total_processed,
+            "records_processed": processed,
             "records_inserted": 0,
-            "records_updated": total_updated,
-            "records_failed": total_failed,
+            "records_updated": upserted,
+            "records_failed": failed + upsert_failed,
         }
         self.log_ingestion("bill_status", **stats)
-        logger.info(f"Bill status ingestion complete: {total_processed} processed, {total_updated} updated")
+        logger.info(
+            f"Bill status ingestion complete: {processed} processed, {upserted} updated, {failed + upsert_failed} failed"
+        )
         return stats
 
-    def _parse_bill_status_xml(self, session: Session, xml_data: bytes) -> bool:
-        """Parse GovInfo bill status XML and update Bill record.
+    def _extract_bill_status_data(self, xml_data: bytes) -> Optional[Dict]:
+        """Extract bill status data from XML without DB operations (thread-safe).
 
-        BILLSTATUS XML has no namespace. Structure:
-        <billStatus>
-          <bill>
-            <congress>118</congress>
-            <type>HR</type>
-            <number>1</number>
-            <title>...</title>
-            <latestAction><actionDate>...</actionDate><text>...</text></latestAction>
-            <sponsors><item><bioguideId>...</bioguideId><fullName>...</fullName></item></sponsors>
-            ...
-          </bill>
-        </billStatus>
+        Returns dict with congress, bill_type, number, title, etc. or None if invalid.
         """
         try:
             root = etree.fromstring(xml_data)
             bill = root.find("bill")
             if bill is None:
-                return False
+                return None
 
-            # Extract bill identifiers
             congress = bill.findtext("congress")
             bill_type = bill.findtext("type")
             bill_number = bill.findtext("number")
 
             if not all([congress, bill_type, bill_number]):
-                return False
+                return None
 
-            # Find existing bill
-            bill_type_lower = bill_type.lower()
-            bill_record = (
-                session.query(Bill)
-                .filter(
-                    Bill.congress_id == int(congress),
-                    Bill.bill_type == bill_type_lower,
-                    Bill.number == int(bill_number),
-                )
-                .first()
-            )
+            data = {
+                "congress": int(congress),
+                "bill_type": bill_type.lower(),
+                "number": int(bill_number),
+                "changed": False,
+            }
 
-            if not bill_record:
-                return False
-
-            # Update bill with status data
             title = bill.findtext("title")
-            introduced_date = parse_date(bill.findtext("introducedDate"))
-            origin_chamber = bill.findtext("originChamber", "").lower()
+            if title:
+                data["title"] = clean_text(title)
 
-            # Latest action
-            latest_action = bill.find("latestAction")
-            latest_action_date = None
-            latest_action_text = None
-            if latest_action is not None:
-                latest_action_date = parse_date(latest_action.findtext("actionDate"))
-                latest_action_text = clean_text(latest_action.findtext("text"))
+            introduced = bill.findtext("introducedDate")
+            if introduced:
+                data["introduced_date"] = parse_date(introduced)
 
-            # Update fields
-            changed = False
-            if title and bill_record.title != clean_text(title):
-                bill_record.title = clean_text(title)
-                changed = True
-            if introduced_date and bill_record.introduced_date != introduced_date:
-                bill_record.introduced_date = introduced_date
-                changed = True
-            if origin_chamber and bill_record.origin_chamber != origin_chamber:
-                bill_record.origin_chamber = origin_chamber
-                changed = True
-            if latest_action_date and bill_record.latest_action_date != latest_action_date:
-                bill_record.latest_action_date = latest_action_date
-                changed = True
-            if latest_action_text and bill_record.latest_action != latest_action_text:
-                bill_record.latest_action = latest_action_text
-                changed = True
+            origin = bill.findtext("originChamber", "").lower()
+            if origin:
+                data["origin_chamber"] = origin
 
-            # Sponsor
+            latest = bill.find("latestAction")
+            if latest is not None:
+                action_date = latest.findtext("actionDate")
+                if action_date:
+                    data["latest_action_date"] = parse_date(action_date)
+                action_text = latest.findtext("text")
+                if action_text:
+                    data["latest_action"] = clean_text(action_text)
+
             sponsor = bill.find("sponsors/item")
             if sponsor is not None:
                 bioguide = sponsor.findtext("bioguideId")
                 if bioguide:
-                    from opendiscourse.models.congress import Member
+                    data["sponsor_bioguide"] = bioguide
 
-                    member = session.query(Member).filter(Member.bioguide_id == bioguide).first()
-                    if member and bill_record.sponsor_id != member.id:
-                        bill_record.sponsor_id = member.id
-                        changed = True
-
-            return changed
+            data["changed"] = True
+            return data
 
         except Exception as e:
-            logger.warning(f"Failed to parse bill status XML: {e}")
-            return False
+            logger.warning(f"Failed to extract bill status data: {e}")
+            return None
 
     # ----------------------------------------------------------------
     # Bill Text (BILLS collection - XML format)

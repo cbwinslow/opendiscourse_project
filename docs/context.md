@@ -9,6 +9,19 @@
 
 ## Recent Decisions
 
+### 2026-04-03 - LlamaIndex RAG Implementation Added
+- **Decision**: Added LlamaIndex for semantic search over government documents
+- **Why LlamaIndex over LangChain**: Specialized for RAG/document indexing with better PostgreSQL integration
+- **Implementation**: Created `src/opendiscourse/rag/` module with DocumentIndexer and DocumentQueryEngine classes
+- **Vector Store**: PGVectorStore with 1536-dimension embeddings (OpenAI ada-002)
+- **Features**:
+  - Index bill texts and congressional records for semantic search
+  - Natural language queries with metadata filtering (congress, bill type, date ranges)
+  - Similarity-based retrieval with configurable thresholds
+- **Database**: Added pgvector extension migration for vector embeddings
+- **Integration**: Works alongside existing LangChain MCP server (different use cases)
+- **Dependencies**: Added llama-index>=0.10 and llama-index-vector-stores-postgres to pyproject.toml
+
 ### 2026-04-03 - GovInfo Ingestion Pipeline Built
 - **GovInfo API is unreliable**: REST API returns 500 errors on collections, date format errors on summaries. Using sitemap/bulk data downloads instead.
 - **Sitemap URLs**: 
