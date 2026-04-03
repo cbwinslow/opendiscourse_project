@@ -1,6 +1,22 @@
 from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, Time, UniqueConstraint, func
 from sqlalchemy.orm import relationship
+import hashlib
 from opendiscourse.database import Base
+
+
+class UniversalIDMixin:
+    """Mixin to add universal ID field computed from natural key fields."""
+
+    universal_id = Column(String(64), unique=True, nullable=False)
+
+    def _compute_universal_id(self, *key_components: str) -> str:
+        """Compute universal ID from key components using SHA-256."""
+        key_string = "|".join(str(component) for component in key_components if component is not None)
+        return hashlib.sha256(key_string.encode("utf-8")).hexdigest()[:32]
+
+    def generate_universal_id(self):
+        """Override in subclasses to generate universal ID from natural keys."""
+        raise NotImplementedError("Subclasses must implement generate_universal_id")
 
 
 class Congress(Base):
@@ -22,7 +38,7 @@ class Chamber(Base):
     name = Column(String(50), nullable=False)
 
 
-class Member(Base):
+class Member(UniversalIDMixin, Base):
     __tablename__ = "members"
 
     id = Column(Integer, primary_key=True)
@@ -60,6 +76,18 @@ class Member(Base):
     last_congress = Column(Integer)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    def generate_universal_id(self):
+        """Generate universal ID from bioguide_id or other stable identifiers."""
+        if self.bioguide_id:
+            self.universal_id = self._compute_universal_id("member", "bioguide", self.bioguide_id)
+        elif self.govtrack_id:
+            self.universal_id = self._compute_universal_id("member", "govtrack", str(self.govtrack_id))
+        else:
+            # Fallback to name-based ID (less stable)
+            self.universal_id = self._compute_universal_id(
+                "member", "name", self.first_name, self.last_name, str(self.date_of_birth)
+            )
 
     terms = relationship("MemberTerm", back_populates="member")
     sponsored_bills = relationship("Bill", back_populates="sponsor", foreign_keys="Bill.sponsor_id")
@@ -115,7 +143,7 @@ class CommitteeMembership(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
-class Bill(Base):
+class Bill(UniversalIDMixin, Base):
     __tablename__ = "bills"
     __table_args__ = (UniqueConstraint("congress_id", "bill_type", "number"),)
 
@@ -141,6 +169,22 @@ class Bill(Base):
     session_law = Column(String(50))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    def generate_universal_id(self):
+        """Generate universal ID from congress, type, and number."""
+        congress_number = getattr(self, "congress_number", None)
+        if not congress_number and self.congress_id:
+            # Look up congress number if needed
+            from sqlalchemy.orm import Session
+            from opendiscourse.database import sync_engine
+
+            with Session(sync_engine) as session:
+                congress = session.query(Congress).filter_by(id=self.congress_id).first()
+                congress_number = congress.congress_number if congress else None
+
+        self.universal_id = self._compute_universal_id(
+            "bill", str(congress_number), self.bill_type.lower(), str(self.number)
+        )
 
     sponsor = relationship("Member", back_populates="sponsored_bills", foreign_keys=[sponsor_id])
     actions = relationship("BillAction", back_populates="bill")

@@ -1,9 +1,25 @@
 from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.orm import relationship
+import hashlib
 from opendiscourse.database import Base
 
 
-class FECCandidate(Base):
+class UniversalIDMixin:
+    """Mixin to add universal ID field computed from natural key fields."""
+
+    universal_id = Column(String(64), unique=True, nullable=False)
+
+    def _compute_universal_id(self, *key_components: str) -> str:
+        """Compute universal ID from key components using SHA-256."""
+        key_string = "|".join(str(component) for component in key_components if component is not None)
+        return hashlib.sha256(key_string.encode("utf-8")).hexdigest()[:32]
+
+    def generate_universal_id(self):
+        """Override in subclasses to generate universal ID from natural keys."""
+        raise NotImplementedError("Subclasses must implement generate_universal_id")
+
+
+class FECCandidate(UniversalIDMixin, Base):
     __tablename__ = "fec_candidates"
 
     id = Column(Integer, primary_key=True)
@@ -20,8 +36,12 @@ class FECCandidate(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    def generate_universal_id(self):
+        """Generate universal ID from FEC candidate ID."""
+        self.universal_id = self._compute_universal_id("fec_candidate", self.fec_candidate_id)
 
-class FECCommittee(Base):
+
+class FECCommittee(UniversalIDMixin, Base):
     __tablename__ = "fec_committees"
 
     id = Column(Integer, primary_key=True)
@@ -39,6 +59,10 @@ class FECCommittee(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    def generate_universal_id(self):
+        """Generate universal ID from FEC committee ID."""
+        self.universal_id = self._compute_universal_id("fec_committee", self.fec_committee_id)
 
 
 class FECCommitteeCandidate(Base):

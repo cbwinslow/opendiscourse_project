@@ -56,6 +56,7 @@ dependencies = [
     "tenacity>=8.2,<9.0",
     "structlog>=24.1,<25.0",
     "orjson>=3.9,<4.0",
+    "schedule>=1.2,<2.0",
 
     # HuggingFace datasets
     "datasets>=2.16,<3.0",
